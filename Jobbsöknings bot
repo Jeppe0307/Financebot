@@ -1,3 +1,5 @@
+# Enkel jobb-bot. Byt SMTP_USER och SMTP_PASS till din avsändaradress och app-lösenord.
+# Spara som jobbot.py och kör med Python 3.
 import os
 import re
 import sqlite3
@@ -11,16 +13,16 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
 
-# --- KONFIG ---
-TO_EMAIL = "Jesper.turtiainen@gmail.com"
+# ----- KONFIG. Ändra bara dessa två rader. -----
+SMTP_USER = "jesper.turtiainen@gmail.com"    # ersätt med avsändarens e-postadress
+SMTP_PASS = "msww axhm hnbr rqyu"       # ersätt med ditt Google app-lösenord
+TO_EMAIL = "Jesper.turtiainen@gmail.com"  # mottagare
 
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER", "")
-SMTP_PASS = os.environ.get("SMTP_PASS", "")
-
+# Övriga inställningar. Behöver du inte röra.
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
 TIMEZONE = "Europe/Helsinki"
-DB_PATH = os.environ.get("JOBBOT_DB", "jobbot.sqlite3")
+DB_PATH = "jobbot.sqlite3"
 
 KEYWORDS = [
     "finance", "financial", "rahoitus", "talous", "bank", "banking",
@@ -52,14 +54,12 @@ SITES = [
     # Luxemburg
     "https://en.jobs.lu/finance-internship/luxembourg/",
     "https://en.moovijob.com/jobs?query=internship%20finance&location=luxembourg",
-    "https://jobs.eib.org/go/Internships/5122310/",
-    "https://jobs.ey.com/en_LU/search/?q=intern&locationsearch=luxembourg",
     "https://lu.indeed.com/jobs?q=finance+intern&l=Luxembourg",
     # Tallinn
     "https://www.cv.ee/en/jobs?keyword=finance%20intern&city=Tallinn",
     "https://www.cvkeskus.ee/en/job-search?keywords=finance%20intern&city=Tallinn",
     "https://ee.indeed.com/jobs?q=finance+intern&l=Tallinn",
-    # Banker
+    # Bank/large employers
     "https://careers.nordea.com/en/jobs?search=intern",
     "https://careers.op.fi/en/open-positions?search=harjoittelu",
     "https://danskebank.com/careers/vacancies?search=intern",
