@@ -1,0 +1,202 @@
+import os
+import re
+import sqlite3
+from datetime import datetime
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import smtplib
+from email.mime.text import MIMEText
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
+
+# --- KONFIG ---
+TO_EMAIL = "Jesper.turtiainen@gmail.com"
+
+SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASS = os.environ.get("SMTP_PASS", "")
+
+TIMEZONE = "Europe/Helsinki"
+DB_PATH = os.environ.get("JOBBOT_DB", "jobbot.sqlite3")
+
+KEYWORDS = [
+    "finance", "financial", "rahoitus", "talous", "bank", "banking",
+    "investment", "asset", "treasury", "accounting", "controller",
+    "analyst", "analyytikko", "equity", "private equity", "venture",
+    "risk", "valuation", "audit", "advisory", "assurance"
+]
+
+INTERNSHIP_WORDS = [
+    "intern", "internship", "trainee", "graduate", "junior",
+    "harjoittelu", "kesätyö", "kesatyö", "summer"
+]
+
+CITIES = {
+    "helsinki": ["helsinki", "helsingfors"],
+    "luxembourg": ["luxembourg", "luxemburg"],
+    "tallinn": ["tallinn", "tallinna"]
+}
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; JobBot/1.0)"}
+
+SITES = [
+    # Finland
+    "https://duunitori.fi/tyopaikat?haku=rahoitus+harjoittelu+Helsinki",
+    "https://duunitori.fi/tyopaikat?haku=finance+internship+Helsinki",
+    "https://tyopaikat.oikotie.fi/haku/kaikki?q=rahoitus%20harjoittelu&alue=helsinki",
+    "https://www.jobly.fi/tyopaikat/harjoittelu?query=rahoitus%20Helsinki",
+    "https://www.academicwork.fi/avoimet-tyopaikat?query=finance%20intern&where=Helsinki",
+    # Luxemburg
+    "https://en.jobs.lu/finance-internship/luxembourg/",
+    "https://en.moovijob.com/jobs?query=internship%20finance&location=luxembourg",
+    "https://jobs.eib.org/go/Internships/5122310/",
+    "https://jobs.ey.com/en_LU/search/?q=intern&locationsearch=luxembourg",
+    "https://lu.indeed.com/jobs?q=finance+intern&l=Luxembourg",
+    # Tallinn
+    "https://www.cv.ee/en/jobs?keyword=finance%20intern&city=Tallinn",
+    "https://www.cvkeskus.ee/en/job-search?keywords=finance%20intern&city=Tallinn",
+    "https://ee.indeed.com/jobs?q=finance+intern&l=Tallinn",
+    # Banker
+    "https://careers.nordea.com/en/jobs?search=intern",
+    "https://careers.op.fi/en/open-positions?search=harjoittelu",
+    "https://danskebank.com/careers/vacancies?search=intern",
+    "https://www.swedbank.com/career/job-opportunities.html",
+    "https://www.sebgroup.com/career"
+]
+
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS sent_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT UNIQUE,
+            title TEXT,
+            detected_at TEXT
+        )
+    """)
+    con.commit()
+    con.close()
+
+def normalize_text(s):
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", s.strip().lower())
+
+def looks_like_job(title, url):
+    t = normalize_text(title)
+    u = normalize_text(url)
+    if not t and not u:
+        return False
+    kw_hit = any(k in t or k in u for k in KEYWORDS)
+    intern_hit = any(k in t or k in u for k in INTERNSHIP_WORDS)
+    city_hit = any(any(c in t or c in u for c in variants) for variants in CITIES.values())
+    return kw_hit and intern_hit and city_hit
+
+def extract_links(url):
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=25)
+        r.raise_for_status()
+    except Exception:
+        return []
+    soup = BeautifulSoup(r.text, "html5lib")
+    out = []
+    for a in soup.find_all("a", href=True):
+        title = a.get_text(" ", strip=True)
+        href = a["href"]
+        full = urljoin(url, href)
+        if looks_like_job(title, full):
+            out.append((title, full))
+    dedup = {}
+    for t, l in out:
+        if l not in dedup:
+            dedup[l] = t
+    return [(dedup[l], l) for l in dedup]
+
+def filter_by_city(items):
+    kept = []
+    for t, l in items:
+        tnorm = normalize_text(t)
+        lnorm = normalize_text(l)
+        if any(v in tnorm or v in lnorm for v in CITIES["helsinki"]) or \
+           any(v in tnorm or v in lnorm for v in CITIES["luxembourg"]) or \
+           any(v in tnorm or v in lnorm for v in CITIES["tallinn"]):
+            kept.append((t, l))
+    return kept
+
+def already_sent(url):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("SELECT 1 FROM sent_links WHERE url = ?", (url,))
+    row = cur.fetchone()
+    con.close()
+    return row is not None
+
+def mark_sent(url, title):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT OR IGNORE INTO sent_links(url, title, detected_at) VALUES(?,?,?)",
+        (url, title, datetime.utcnow().isoformat())
+    )
+    con.commit()
+    con.close()
+
+def crawl_all():
+    results = []
+    for site in SITES:
+        links = extract_links(site)
+        links = filter_by_city(links)
+        for title, url in links:
+            if not already_sent(url):
+                results.append((title, url))
+    return results
+
+def build_email_body(items):
+    if not items:
+        return "Inga nya relevanta annonser hittades idag."
+    parts = []
+    header = "Nya finanspraktik som matchar dina filter\n"
+    parts.append(header)
+    parts.append(f"Datum: {datetime.now(pytz.timezone(TIMEZONE)).strftime('%Y-%m-%d')}\n")
+    for t, l in items:
+        parts.append(f"- {t}\n  {l}")
+    return "\n".join(parts)
+
+def send_email(subject, body):
+    if not SMTP_USER or not SMTP_PASS or not TO_EMAIL:
+        return
+    msg = MIMEText(body, _charset="utf-8")
+    msg["Subject"] = subject
+    msg["From"] = SMTP_USER
+    msg["To"] = TO_EMAIL
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as s:
+        s.starttls()
+        s.login(SMTP_USER, SMTP_PASS)
+        s.send_message(msg)
+
+def daily_job():
+    new_items = crawl_all()
+    if new_items:
+        for t, u in new_items:
+            mark_sent(u, t)
+    subject = "Daglig sammanställning: finanspraktik Helsingfors, Luxemburg, Tallinn"
+    body = build_email_body(new_items)
+    send_email(subject, body)
+
+def main():
+    init_db()
+    tz = pytz.timezone(TIMEZONE)
+    scheduler = BlockingScheduler(timezone=tz)
+    scheduler.add_job(daily_job, CronTrigger(hour=12, minute=0))
+    print("Jobbot startad. Väntar på nästa körning kl 12:00 Europe/Helsinki.")
+    try:
+        scheduler.start()
+    except (KeyboardInterrupt, SystemExit):
+        print("Stoppad.")
+
+if __name__ == "__main__":
+    main()
